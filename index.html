@@ -227,7 +227,7 @@ html,body{margin:0}
 <script>
 /* ===================== CONFIG ===================== */
 const CONFIG = {
-  VERSION: "v1.1",
+  VERSION: "v1.2",
   API_URL: "https://script.google.com/macros/s/AKfycbwfxIc46TQ7griKcfTst3lVoTT1OKLYRUlbRwcoqnHLmPiKxPmhjkN9aWUSgkMFp-AVgQ/exec",
   LIFF_ID: "2012074679-ahtKc77N",
   OPEN: 11 * 60,
@@ -294,7 +294,7 @@ function fatal(text) { $("#app").innerHTML = `<div class="empty" style="margin-t
 /* ===================== boot ===================== */
 async function boot() {
   try { await liff.init({ liffId: CONFIG.LIFF_ID }); }
-  catch (e) { return fatal('เปิดหน้าจองไม่สำเร็จ กรุณาเปิดจากเมนู "จอง" ในไลน์ร้าน BSRacing'); }
+  catch (e) { return fatal('เปิดหน้าจองไม่สำเร็จ กรุณาเปิดจากเมนู "ระบบนัดหมาย" ในไลน์ร้าน BSRacing'); }
   if (!liff.isLoggedIn()) { liff.login({ redirectUri: location.href }); return; }
   ID_TOKEN = liff.getIDToken();
   const dec = liff.getDecodedIDToken() || {};
@@ -497,7 +497,7 @@ $("#barBtn").addEventListener("click", async () => {
     // ส่งข้อความในนามลูกค้าเข้าแชทร้าน เพื่อให้มีประวัติในแชท
     try {
       if (liff.isInClient()) await liff.sendMessages([{ type: "text",
-        text: `ขอจอง ${s.name}\n${thDate(rec.date)} ${hm(rec.start)}–${hm(rec.end)}\nเลขที่ ${rec.id}` }]);
+        text: `ขอลงเวลา ${s.name}\n${thDate(rec.date)} ${hm(rec.start)}–${hm(rec.end)}\nเลขที่ ${rec.id}` }]);
     } catch (_) {}
     window.scrollTo({ top: 0 });
   } catch (err) {
