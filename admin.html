@@ -253,7 +253,7 @@ button.blk:hover{filter:brightness(1.12)}
 <script>
 /* ===================== CONFIG ===================== */
 const CONFIG = {
-  VERSION: "v1.1",
+  VERSION: "v1.2",
   API_URL: "https://script.google.com/macros/s/AKfycbwfxIc46TQ7griKcfTst3lVoTT1OKLYRUlbRwcoqnHLmPiKxPmhjkN9aWUSgkMFp-AVgQ/exec",
   LIFF_ID: "2012074679-ktyOGuKv",
   OPEN: 11 * 60,
@@ -288,9 +288,14 @@ const clock = ms => { if (!ms) return ""; const d = new Date(Number(ms)); const 
 const initials = n => esc([...String(n || "?").trim()][0] || "?");
 
 let ID_TOKEN = "", TODAY = "";
-const A = { me:null, view:"queue", date:"", pending:null, day:null, users:null, loading:false,
+const A = { me:null, view:"queue", date:"", pending:null, days:{}, users:null, loading:false,
   confirmReject:null, confirmCancel:null, confirmRemove:null, edit:null, ed:null, working:false,
   walk:{ type:"walkin", station:"SIM1", start:CONFIG.OPEN, dur:60, name:"", phone:"" }, err:"", errAt:"" };
+// A.day = คิวของวันที่กำลังดู (เก็บแยกทุกวันใน A.days สลับวันได้ทันที)
+Object.defineProperty(A, "day", {
+  get() { return A.days[A.date] || null; },
+  set(v) { if (v === null) delete A.days[A.date]; else A.days[A.date] = v; }
+});
 
 /* ===================== API ===================== */
 async function api(action, payload = {}) {
@@ -319,19 +324,27 @@ async function boot() {
   if (!liff.isLoggedIn()) { liff.login({ redirectUri: location.href }); return; }
   ID_TOKEN = liff.getIDToken();
   try {
-    const cfg = await api("config");
-    TODAY = cfg.today; A.date = TODAY;
-    A.me = await api("admin.me");
+    // โหลดสิทธิ์ + คำขอ + คิว 8 วัน ในครั้งเดียว
+    const r = await api("admin.init");
+    A.me = r.me; TODAY = r.today; A.date = TODAY;
+    if (r.me.role) applySnap(r);
   } catch (e) { return fatal(e.message); }
-  if (A.me.role) await loadQueue();
   render();
   setInterval(autoRefresh, CONFIG.REFRESH_SEC * 1000);
 }
 
-async function loadQueue() {
-  const [pending, day] = await Promise.all([api("admin.pending"), api("admin.day", { date: A.date })]);
-  A.pending = pending; A.day = day;
+function windowDates() {
+  const d = [];
+  for (let i = -1; i < 7; i++) d.push(addDays(TODAY, i));
+  if (A.date && !d.includes(A.date)) d.push(A.date);
+  return d;
 }
+function applySnap(s) {
+  if (s.today) TODAY = s.today;
+  A.pending = s.pending;
+  Object.assign(A.days, s.days || {});
+}
+async function loadQueue() { applySnap(await api("admin.init", { dates: windowDates() })); }
 async function loadUsers() { A.users = await api("admin.users"); }
 
 async function autoRefresh() {
@@ -341,15 +354,47 @@ async function autoRefresh() {
   try { await loadQueue(); render(); } catch (_) {}
 }
 
-// ทำงาน 1 คำสั่ง แล้วโหลดข้อมูลใหม่
-async function run(fn, okText, errAt) {
+function findItem(id) {
+  return (A.pending || []).find(x => x.id === id) ||
+    Object.values(A.days).flat().find(x => x.id === id) || null;
+}
+function localBackup() {
+  const p = (A.pending || []).slice(), days = JSON.parse(JSON.stringify(A.days));
+  return () => { A.pending = p; A.days = days; };
+}
+// แก้หน้าจอทันทีก่อนรอระบบตอบ (ถ้าระบบตอบว่าไม่สำเร็จ จะย้อนกลับให้เอง)
+const optimistic = {
+  approve(id) {
+    const it = findItem(id); if (!it) return;
+    A.pending = A.pending.filter(x => x.id !== id);
+    const list = A.days[it.date]; const d = list && list.find(x => x.id === id);
+    if (d) Object.assign(d, { status: "approved", approvedBy: A.me.name, approvedAt: Date.now() });
+  },
+  reject(id) {
+    const it = findItem(id); if (!it) return;
+    A.pending = A.pending.filter(x => x.id !== id);
+    if (A.days[it.date]) A.days[it.date] = A.days[it.date].filter(x => x.id !== id);
+  },
+  cancel(id) {
+    Object.keys(A.days).forEach(k => A.days[k] = A.days[k].filter(x => x.id !== id));
+  }
+};
+
+// ทำงาน 1 คำสั่ง แล้วใช้ข้อมูลล่าสุดที่ระบบส่งกลับมา
+async function run(fn, okText, errAt, before) {
   if (A.working) return;
-  A.working = true; A.err = ""; render();
+  A.working = true; A.err = "";
+  const restore = before ? localBackup() : null;
+  if (before) before();
+  render();
   try {
-    await fn();
-    if (A.me && A.me.role) { if (A.view === "users") await loadUsers(); else await loadQueue(); }
+    const res = await fn();
+    if (res && res.snap) applySnap(res.snap);
+    else if (A.view === "users" && res && res.admins) A.users = res;
+    else if (A.me && A.me.role) { if (A.view === "users") await loadUsers(); else await loadQueue(); }
     if (okText) flash(okText, "ok");
   } catch (e) {
+    if (restore) restore();
     A.err = e.message; A.errAt = errAt || ""; flash(e.message, "err");
     try { if (A.me && A.me.role && A.view === "queue") await loadQueue(); } catch (_) {}
   }
@@ -577,11 +622,11 @@ $("#app").addEventListener("click", async e => {
   if (d.reqaccess) return run(async () => { A.me = await api("admin.request"); }, "ส่งคำขอแล้ว");
   if (d.view) { A.view = d.view; A.confirmRemove = null; A.err = ""; if (A.view === "users") A.users = null; return render(); }
   if (d.refresh) return run(async () => {});
-  if (d.approve) return run(() => api("admin.approve", { id: d.approve }), "อนุมัติแล้ว ลงปฏิทินและแจ้งลูกค้าเรียบร้อย");
+  if (d.approve) { const id = d.approve; return run(() => api("admin.approve", { id, dates: windowDates() }), "อนุมัติแล้ว ลงปฏิทินและแจ้งลูกค้าเรียบร้อย", "", () => optimistic.approve(id)); }
   if (d.askreject) { A.confirmReject = d.askreject; return render(); }
   if (d.cancelreject) { A.confirmReject = null; return render(); }
-  if (d.reject) { A.confirmReject = null; return run(() => api("admin.reject", { id: d.reject }), "ไม่อนุมัติแล้ว แจ้งลูกค้าเรียบร้อย"); }
-  if (d.adate) { A.date = d.adate; A.edit = null; A.confirmCancel = null; A.day = null; render(); return run(async () => {}); }
+  if (d.reject) { const id = d.reject; A.confirmReject = null; return run(() => api("admin.reject", { id, dates: windowDates() }), "ไม่อนุมัติแล้ว แจ้งลูกค้าเรียบร้อย", "", () => optimistic.reject(id)); }
+  if (d.adate) { A.date = d.adate; A.edit = null; A.confirmCancel = null; render(); if (!A.days[A.date]) return run(async () => {}); return; }
   if (d.wtype) { A.walk.type = d.wtype; return render(); }
   if (d.etype) { A.ed.type = d.etype; return render(); }
   if (d.edit) {
@@ -592,16 +637,16 @@ $("#app").addEventListener("click", async e => {
   if (d.closeedit) { A.edit = null; A.err = ""; return render(); }
   if (d.save) {
     const id = d.save, ed = A.ed;
-    return run(async () => { await api("admin.update", { id, type: ed.type, station: ed.station, start: ed.start, dur: ed.dur }); A.edit = null; }, "บันทึกแล้ว", "edit");
+    return run(async () => { const r = await api("admin.update", { id, type: ed.type, station: ed.station, start: ed.start, dur: ed.dur, dates: windowDates() }); A.edit = null; return r; }, "บันทึกแล้ว", "edit");
   }
   if (d.askcancel) { A.confirmCancel = d.askcancel; A.edit = null; return render(); }
   if (d.keep) { A.confirmCancel = null; return render(); }
-  if (d.cancelbk) { const id = d.cancelbk; A.confirmCancel = null; return run(() => api("admin.cancel", { id }), "ยกเลิกคิวแล้ว"); }
+  if (d.cancelbk) { const id = d.cancelbk; A.confirmCancel = null; return run(() => api("admin.cancel", { id, dates: windowDates() }), "ยกเลิกคิวแล้ว", "", () => optimistic.cancel(id)); }
   if (t.id === "w-add") {
     const w = A.walk;
     return run(async () => {
-      await api("admin.add", { type: w.type, station: w.station, date: A.date, start: w.start, dur: w.dur, name: w.name.trim(), phone: w.phone.trim() });
-      w.name = ""; w.phone = "";
+      const r = await api("admin.add", { type: w.type, station: w.station, date: A.date, start: w.start, dur: w.dur, name: w.name.trim(), phone: w.phone.trim(), dates: windowDates() });
+      w.name = ""; w.phone = ""; return r;
     }, "เพิ่มคิวแล้ว", "walk");
   }
   if (d.grant) return run(() => api("admin.grant", { lineId: d.grant }), "ให้สิทธิ์แล้ว");

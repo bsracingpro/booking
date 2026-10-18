@@ -227,7 +227,7 @@ html,body{margin:0}
 <script>
 /* ===================== CONFIG ===================== */
 const CONFIG = {
-  VERSION: "v1.2",
+  VERSION: "v1.3",
   API_URL: "https://script.google.com/macros/s/AKfycbwfxIc46TQ7griKcfTst3lVoTT1OKLYRUlbRwcoqnHLmPiKxPmhjkN9aWUSgkMFp-AVgQ/exec",
   LIFF_ID: "2012074679-ahtKc77N",
   OPEN: 11 * 60,
@@ -268,7 +268,7 @@ const save = (k, v) => { try { localStorage.setItem(k, v); } catch (_) {} };
 
 let ID_TOKEN = "", TODAY = "";
 const S = { tab:"book", station:null, date:"", start:null, dur:null, name:"", phone:"", people:1,
-            done:null, err:"", busy:{}, loadingBusy:"", mine:null, loadingMine:false, sending:false };
+            done:null, err:"", busy:{}, busyAt:{}, loadingBusy:"", mine:null, loadingMine:false, sending:false };
 
 /* ===================== API ===================== */
 async function api(action, payload = {}) {
@@ -302,27 +302,45 @@ async function boot() {
   S.name = load("bs_name") || dec.name || "";
   S.phone = load("bs_phone");
   try {
-    const cfg = await api("config");
-    TODAY = cfg.today; S.date = TODAY;
+    // โหลดเวลาว่างของทุกเครื่องล่วงหน้า 7 วันในครั้งเดียว กดเลือกเครื่อง/วันแล้วขึ้นทันที
+    const r = await api("init");
+    TODAY = r.config.today; S.date = TODAY;
+    S.busy = r.busy; const now = Date.now();
+    Object.keys(r.busy).forEach(d => S.busyAt[d] = now);
   } catch (e) { return fatal(e.message); }
   if (location.hash === "#mine") S.tab = "mine";
   render();
+  loadMine(true);
+}
+
+const typing = () => { const el = document.activeElement; return el && /INPUT|SELECT|TEXTAREA/.test(el.tagName); };
+
+// อัปเดตเวลาว่างเบื้องหลัง โดยไม่ให้ผู้ใช้รอ
+async function refreshBusy(date) {
+  if (Date.now() - (S.busyAt[date] || 0) < 45000) return;
+  S.busyAt[date] = Date.now();
+  try {
+    const data = await api("busy", { date });
+    const changed = JSON.stringify(data) !== JSON.stringify(S.busy[date]);
+    S.busy[date] = data;
+    if (changed && !typing() && !S.sending) render();
+  } catch (_) {}
 }
 
 async function loadBusy(date) {
   if (S.loadingBusy === date) return;
   S.loadingBusy = date;
-  try { S.busy[date] = await api("busy", { date }); }
+  try { S.busy[date] = await api("busy", { date }); S.busyAt[date] = Date.now(); }
   catch (e) { flash(e.message, true); }
   if (S.loadingBusy === date) S.loadingBusy = "";
   render();
 }
-async function loadMine() {
+async function loadMine(silent) {
   if (S.loadingMine) return;
   S.loadingMine = true;
-  try { S.mine = await api("mine"); } catch (e) { flash(e.message, true); S.mine = S.mine || []; }
+  try { S.mine = await api("mine"); } catch (e) { if (!silent) flash(e.message, true); S.mine = S.mine || []; }
   S.loadingMine = false;
-  render();
+  if (!silent || S.tab === "mine") { if (!typing()) render(); }
 }
 
 /* ===================== slot logic ===================== */
@@ -351,7 +369,7 @@ function render() {
     </div>`;
 
   if (S.tab === "mine") {
-    if (!S.mine) { loadMine(); root.innerHTML = html + `<div class="loading">กำลังโหลดการจอง</div>`; $("#bar").hidden = true; return; }
+    if (!S.mine) { root.innerHTML = html + `<div class="loading">กำลังโหลดการจอง</div>`; $("#bar").hidden = true; return; }
     const list = S.mine.slice().reverse();
     html += `<div class="step"><h2>การจองของฉัน</h2><button class="btn ghost sm" data-refresh="mine" style="margin-left:auto">รีเฟรช</button></div>`;
     html += list.length ? `<div class="list">${list.map(cardMine).join("")}</div>` : `<div class="empty">ยังไม่มีการจอง</div>`;
@@ -468,14 +486,14 @@ function updateBar() {
 /* ===================== events ===================== */
 $("#app").addEventListener("click", e => {
   const t = e.target.closest("button"); if (!t) return;
-  if (t.dataset.tab) { S.tab = t.dataset.tab; S.done = null; S.err = ""; if (S.tab === "mine") S.mine = null; return render(); }
-  if (t.dataset.refresh) { S.mine = null; return render(); }
-  if (t.dataset.st) { S.station = t.dataset.st; S.start = null; S.dur = null; S.people = 1; S.err = ""; delete S.busy[S.date]; return render(); }
-  if (t.dataset.date) { S.date = t.dataset.date; S.start = null; S.dur = null; S.err = ""; delete S.busy[S.date]; return render(); }
-  if (t.dataset.start) { S.start = +t.dataset.start; S.dur = 60; S.err = ""; return render(); }
+  if (t.dataset.tab) { S.tab = t.dataset.tab; S.done = null; S.err = ""; render(); if (S.tab === "mine") loadMine(true); return; }
+  if (t.dataset.refresh) { t.disabled = true; t.textContent = "กำลังโหลด…"; S.loadingMine = false; return loadMine(false); }
+  if (t.dataset.st) { S.station = t.dataset.st; S.start = null; S.dur = null; S.people = 1; S.err = ""; render(); refreshBusy(S.date); return; }
+  if (t.dataset.date) { S.date = t.dataset.date; S.start = null; S.dur = null; S.err = ""; render(); refreshBusy(S.date); return; }
+  if (t.dataset.start) { S.start = +t.dataset.start; S.dur = 60; S.err = ""; render(); refreshBusy(S.date); return; }
   if (t.dataset.dur) { S.dur = +t.dataset.dur; return render(); }
   if (t.id === "again") { S.done = null; S.start = null; S.dur = null; return render(); }
-  if (t.id === "toMine") { S.done = null; S.tab = "mine"; S.mine = null; return render(); }
+  if (t.id === "toMine") { S.done = null; S.tab = "mine"; render(); return loadMine(true); }
 });
 $("#app").addEventListener("input", e => {
   if (e.target.id === "f-name") S.name = e.target.value;
@@ -493,7 +511,11 @@ $("#barBtn").addEventListener("click", async () => {
     const rec = await api("create", { station: S.station, date: S.date, start: S.start, dur: S.dur,
       name: S.name.trim(), phone: S.phone.trim(), people: S.people });
     save("bs_name", S.name.trim()); save("bs_phone", S.phone.trim());
-    S.done = rec; delete S.busy[S.date]; S.mine = null;
+    S.done = rec;
+    // ใส่คิวที่เพิ่งจองลงในข้อมูลเวลาว่างทันที แล้วโหลดของจริงตามมาเบื้องหลัง
+    (S.busy[rec.date] = S.busy[rec.date] || []).push({ station: rec.station, start: rec.start, end: rec.end });
+    S.busyAt[rec.date] = 0; S.mine = (S.mine || []).concat([rec]);
+    setTimeout(() => loadMine(true), 300);
     // ส่งข้อความในนามลูกค้าเข้าแชทร้าน เพื่อให้มีประวัติในแชท
     try {
       if (liff.isInClient()) await liff.sendMessages([{ type: "text",
@@ -502,7 +524,7 @@ $("#barBtn").addEventListener("click", async () => {
     window.scrollTo({ top: 0 });
   } catch (err) {
     S.err = err.message;
-    if (err.code === "CONFLICT") { delete S.busy[S.date]; S.start = null; S.dur = null; }
+    if (err.code === "CONFLICT") { S.busyAt[S.date] = 0; refreshBusy(S.date); S.start = null; S.dur = null; }
     flash(err.message, true);
   }
   S.sending = false;
